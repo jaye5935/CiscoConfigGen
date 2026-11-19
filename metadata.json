@@ -1,0 +1,6 @@
+{
+  "name": "سیسکو ساز | تولید کانفیگ سوئیچ",
+  "description": "ابزار حرفه‌ای تولید کانفیگ، VLAN و هاردینگ امنیتی سوئیچ‌های سیسکو (IOS) ویژه موبایل و اندروید",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
