@@ -15,8 +15,8 @@ export default defineConfig(() => {
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         manifest: {
           id: '/',
-          name: 'سیسکو ساز — تولید کانفیگ سوئیچ',
-          short_name: 'سیسکو ساز',
+          name: 'Cisco Config Generator',
+          short_name: 'Cisco Config',
           description: 'ابزار مهندسی شبکه برای تولید کانفیگ، VLAN و هاردینگ سوئیچ‌های سیسکو',
           theme_color: '#0284c7',
           background_color: '#0f172a',

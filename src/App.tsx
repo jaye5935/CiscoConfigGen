@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   FolderOpen,
   Moon,
@@ -17,45 +17,37 @@ import { ProfilesModal } from './components/ProfilesModal';
 import { VlanAndPortsTab } from './components/VlanAndPortsTab';
 import { SavedProfile, SwitchConfigState } from './types/cisco';
 import { getHardeningSummary, PRESET_CONFIGS } from './utils/ciscoGenerator';
+import {
+  deleteProfileFromDb,
+  importProfilesToDb,
+  loadAllProfiles,
+  loadCurrentWorkspace,
+  saveCurrentWorkspace,
+  saveProfileToDb,
+} from './utils/localDb';
 
 type ActiveTab = 'basic' | 'vlan' | 'hardening' | 'cli';
 
-const STORAGE_KEY_CURRENT = 'ciscosaz_current_config_v6';
-const STORAGE_KEY_PROFILES = 'ciscosaz_saved_profiles_v1';
 const STORAGE_KEY_THEME = 'ciscosaz_theme_v1';
 
-export default function App() {
-  const [config, setConfig] = useState<SwitchConfigState>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY_CURRENT);
-      if (saved) {
-        const parsed = JSON.parse(saved) as SwitchConfigState;
-        return {
-          ...structuredClone(PRESET_CONFIGS.standard.config),
-          ...parsed,
-          hardening: {
-            ...PRESET_CONFIGS.standard.config.hardening,
-            ...(parsed.hardening ?? {}),
-          },
-        };
-      }
-    } catch {
-      // ignore parse errors
-    }
-    return structuredClone(PRESET_CONFIGS.standard.config);
-  });
+function mergeWithDefaults(parsed: SwitchConfigState): SwitchConfigState {
+  const base = structuredClone(PRESET_CONFIGS.standard.config);
+  return {
+    ...base,
+    ...parsed,
+    hardening: {
+      ...base.hardening,
+      ...(parsed.hardening ?? {}),
+    },
+  };
+}
 
-  const [savedProfiles, setSavedProfiles] = useState<SavedProfile[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_PROFILES);
-      if (raw) {
-        return JSON.parse(raw) as SavedProfile[];
-      }
-    } catch {
-      // ignore parse errors
-    }
-    return [];
-  });
+export default function App() {
+  const [config, setConfig] = useState<SwitchConfigState>(() =>
+    structuredClone(PRESET_CONFIGS.standard.config)
+  );
+  const [savedProfiles, setSavedProfiles] = useState<SavedProfile[]>([]);
+  const dbHydratedRef = useRef(false);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('basic');
   const [isProfilesOpen, setIsProfilesOpen] = useState(false);
@@ -82,20 +74,33 @@ export default function App() {
   }, [isDark]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY_CURRENT, JSON.stringify(config));
-    } catch {
-      // ignore quota errors
-    }
-  }, [config]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const [storedWorkspace, storedProfiles] = await Promise.all([
+          loadCurrentWorkspace(),
+          loadAllProfiles(),
+        ]);
+        if (cancelled) return;
+        if (storedWorkspace) {
+          setConfig(mergeWithDefaults(storedWorkspace));
+        }
+        setSavedProfiles(storedProfiles);
+      } finally {
+        if (!cancelled) {
+          dbHydratedRef.current = true;
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY_PROFILES, JSON.stringify(savedProfiles));
-    } catch {
-      // ignore quota errors
-    }
-  }, [savedProfiles]);
+    if (!dbHydratedRef.current) return;
+    void saveCurrentWorkspace(config);
+  }, [config]);
 
   const hardeningSummary = useMemo(
     () => getHardeningSummary(config.hardening),
@@ -112,10 +117,18 @@ export default function App() {
       config: structuredClone(config),
     };
     setSavedProfiles((prev) => [newProfile, ...prev]);
+    void saveProfileToDb(newProfile);
   };
 
   const handleDeleteProfile = (id: string) => {
     setSavedProfiles((prev) => prev.filter((p) => p.id !== id));
+    void deleteProfileFromDb(id);
+  };
+
+  const handleImportProfiles = async (profiles: SavedProfile[]) => {
+    await importProfilesToDb(profiles);
+    const refreshed = await loadAllProfiles();
+    setSavedProfiles(refreshed);
   };
 
   const handleReset = () => {
@@ -130,8 +143,11 @@ export default function App() {
       <header className="sticky top-0 z-30 h-[52px] lg:h-16 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800">
         <div className="max-w-7xl mx-auto h-full px-4 sm:px-6 flex items-center justify-between gap-4 lg:gap-8">
           {/* Zone 1: Brand Title */}
-          <span className="text-base sm:text-lg font-extrabold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap shrink-0">
-            سیسکو ساز
+          <span
+            dir="ltr"
+            className="text-sm sm:text-base font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap shrink-0 truncate max-w-[165px] sm:max-w-none"
+          >
+            Cisco Config Generator
           </span>
 
           {/* Zone 2: Desktop Navigation Links */}
@@ -367,8 +383,9 @@ export default function App() {
         currentConfig={config}
         savedProfiles={savedProfiles}
         onSaveProfile={handleSaveProfile}
-        onLoadConfig={setConfig}
+        onLoadConfig={(next) => setConfig(mergeWithDefaults(next))}
         onDeleteProfile={handleDeleteProfile}
+        onImportProfiles={handleImportProfiles}
       />
 
       {/* Offline Connectivity Banner */}

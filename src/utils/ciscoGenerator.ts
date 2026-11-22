@@ -531,6 +531,388 @@ export function generateCiscoCli(state: SwitchConfigState): string {
   return lines.join('\n');
 }
 
+export function expandPortInterfaces(pg: PortGroupConfig): string[] {
+  const result: string[] = [];
+  const prefix =
+    pg.portType && pg.portNumbers?.trim()
+      ? `${pg.portType}${pg.slotPrefix ?? ''}`
+      : '';
+  const rawNums = pg.portType && pg.portNumbers?.trim()
+    ? pg.portNumbers.trim().replace(/\s+/g, '')
+    : pg.interfaceRange?.trim() ?? '';
+
+  if (!rawNums) return result;
+
+  if (!prefix) {
+    return [rawNums];
+  }
+
+  rawNums.split(',').forEach((segment) => {
+    const part = segment.trim();
+    if (!part) return;
+    const rangeMatch = part.match(/^(\d+)-(\d+)$/);
+    if (rangeMatch) {
+      const a = Number(rangeMatch[1]);
+      const b = Number(rangeMatch[2]);
+      const start = Math.min(a, b);
+      const end = Math.max(a, b);
+      for (let i = start; i <= end && result.length < 128; i++) {
+        result.push(`${prefix}${i}`);
+      }
+    } else if (/^\d+$/.test(part)) {
+      result.push(`${prefix}${part}`);
+    } else {
+      result.push(/^[a-zA-Z]/.test(part) ? part : `${prefix}${part}`);
+    }
+  });
+
+  return result;
+}
+
+export function generateStartupConfigFile(state: SwitchConfigState): string {
+  const lines: string[] = [];
+  const h = state.hardening;
+
+  lines.push('!');
+  lines.push(`! Cisco IOS Startup Configuration File (config.text) - ${state.hostname.trim() || 'Switch'}`);
+  lines.push('! Upload command: copy tftp://<SERVER_IP>/config.text startup-config');
+  lines.push('!');
+  lines.push('version 15.2');
+  if (h.disableUnnecessaryServices) {
+    lines.push('no service pad');
+  }
+  if (h.serviceTimestamps) {
+    lines.push('service timestamps debug datetime msec localtime show-timezone');
+    lines.push('service timestamps log datetime msec localtime show-timezone');
+  }
+  if (h.servicePasswordEncryption) {
+    lines.push('service password-encryption');
+  }
+  if (h.disableUnnecessaryServices) {
+    lines.push('no service tcp-small-servers');
+    lines.push('no service udp-small-servers');
+  }
+  lines.push('!');
+  if (state.hostname.trim()) {
+    lines.push(`hostname ${state.hostname.trim()}`);
+  }
+  lines.push('!');
+  lines.push('boot-start-marker');
+  lines.push('boot-end-marker');
+  lines.push('!');
+
+  if (h.loggingBuffered) {
+    lines.push('logging buffered 32768 informational');
+  }
+  if (state.enableSecret.trim()) {
+    if (state.enableAlgorithm === 'scrypt') {
+      lines.push(`enable algorithm-type scrypt secret ${state.enableSecret.trim()}`);
+    } else {
+      lines.push(`enable secret ${state.enableSecret.trim()}`);
+    }
+  }
+  if (h.minPasswordLengthEnabled) {
+    lines.push(`security passwords min-length ${h.minPasswordLength}`);
+  }
+  if (h.loginBlockEnabled) {
+    lines.push(
+      `login block-for ${h.loginBlockSeconds} attempts ${h.loginBlockAttempts} within ${h.loginBlockWithin}`
+    );
+  }
+  lines.push('!');
+
+  if (h.aaaNewModel) {
+    lines.push('aaa new-model');
+    lines.push('aaa authentication login default local');
+    lines.push('aaa authorization exec default local');
+    lines.push('!');
+  }
+
+  state.users.forEach((user) => {
+    const uname = user.username.trim();
+    const pass = user.password.trim();
+    if (!uname || !pass) return;
+    const priv = Math.min(15, Math.max(0, Number(user.privilege) || 15));
+    if (user.secretType === 'scrypt') {
+      lines.push(`username ${uname} privilege ${priv} algorithm-type scrypt secret ${pass}`);
+    } else if (user.secretType === 'secret') {
+      lines.push(`username ${uname} privilege ${priv} secret ${pass}`);
+    } else {
+      lines.push(`username ${uname} privilege ${priv} password ${pass}`);
+    }
+  });
+  if (state.users.length > 0) {
+    lines.push('!');
+  }
+
+  if (h.iranTimezone) {
+    lines.push('clock timezone IRST 3 30');
+  }
+  if (h.noIpDomainLookup) {
+    lines.push('no ip domain-lookup');
+  }
+  if (state.domainName.trim()) {
+    lines.push(`ip domain-name ${state.domainName.trim()}`);
+  }
+  if (h.disableUnnecessaryServices) {
+    lines.push('no ip source-route');
+    lines.push('no ip finger');
+    lines.push('no ip bootp server');
+  }
+  lines.push('!');
+
+  const validVlans = state.vlans.filter((v) => v.vlanId >= 1 && v.vlanId <= 4094);
+  if (h.dhcpSnooping) {
+    const snoopVlans = h.dhcpSnoopingVlans.trim() || validVlans.map((v) => v.vlanId).join(',');
+    if (snoopVlans) {
+      lines.push(`ip dhcp snooping vlan ${snoopVlans}`);
+    }
+    lines.push('no ip dhcp snooping information option');
+    lines.push('ip dhcp snooping');
+  }
+  if (h.dynamicArpInspection) {
+    const daiVlans = h.daiVlans.trim() || validVlans.map((v) => v.vlanId).join(',');
+    if (daiVlans) {
+      lines.push(`ip arp inspection vlan ${daiVlans}`);
+    }
+    lines.push('ip arp inspection validate src-mac dst-mac ip');
+  }
+  if (h.rapidPvst) {
+    lines.push('spanning-tree mode rapid-pvst');
+  }
+  if (h.globalPortFastDefault) {
+    lines.push('spanning-tree portfast default');
+  }
+  if (h.globalBpduGuardDefault) {
+    lines.push('spanning-tree portfast bpduguard default');
+  }
+  if (h.globalLoopGuard) {
+    lines.push('spanning-tree loopguard default');
+  }
+  if (h.disableCdpGlobal) {
+    lines.push('no cdp run');
+  }
+  if (h.disableLldpGlobal) {
+    lines.push('no lldp run');
+  }
+  if (h.disableSmartInstall) {
+    lines.push('no vstack');
+  }
+  lines.push('!');
+
+  // VLANs inside startup-config
+  validVlans.forEach((vlan) => {
+    if (vlan.vlanId === 1) return;
+    lines.push(`vlan ${vlan.vlanId}`);
+    if (vlan.name.trim()) {
+      lines.push(` name ${vlan.name.trim().replace(/\s+/g, '_')}`);
+    }
+    lines.push(vlan.state === 'suspend' ? ' state suspend' : ' state active');
+    lines.push('!');
+  });
+
+  // Physical Interfaces (expanded individually for startup-config compatibility)
+  state.portGroups.forEach((pg) => {
+    const ifaces = expandPortInterfaces(pg);
+    ifaces.forEach((ifaceName) => {
+      lines.push(`interface ${ifaceName}`);
+      if (pg.description.trim()) {
+        lines.push(` description ${pg.description.trim()}`);
+      }
+      if (pg.mode === 'shutdown') {
+        lines.push(` switchport access vlan ${pg.accessVlan || 999}`);
+        lines.push(' switchport mode access');
+        lines.push(' switchport nonegotiate');
+        lines.push(' shutdown');
+      } else if (pg.mode === 'access') {
+        lines.push(` switchport access vlan ${pg.accessVlan}`);
+        lines.push(' switchport mode access');
+        if (pg.voiceVlan && pg.voiceVlan > 0) {
+          lines.push(` switchport voice vlan ${pg.voiceVlan}`);
+        }
+        lines.push(' switchport nonegotiate');
+        if (pg.portSecurity) {
+          lines.push(` switchport port-security maximum ${pg.maxMac}`);
+          if (pg.stickyMac) {
+            lines.push(' switchport port-security mac-address sticky');
+          }
+          lines.push(` switchport port-security violation ${pg.violation}`);
+          lines.push(' switchport port-security');
+        }
+        if (pg.stormControl) {
+          lines.push(' storm-control broadcast level 20.00');
+          lines.push(' storm-control multicast level 20.00');
+        }
+        if (pg.portFast) {
+          lines.push(' spanning-tree portfast');
+        }
+        if (pg.bpduGuard) {
+          lines.push(' spanning-tree bpduguard enable');
+        }
+      } else if (pg.mode === 'trunk') {
+        lines.push(` switchport trunk native vlan ${pg.nativeVlan}`);
+        if (pg.allowedVlans.trim()) {
+          lines.push(` switchport trunk allowed vlan ${pg.allowedVlans.trim()}`);
+        }
+        lines.push(' switchport trunk encapsulation dot1q');
+        lines.push(' switchport mode trunk');
+        lines.push(' switchport nonegotiate');
+        if (pg.dhcpTrust && h.dhcpSnooping) {
+          lines.push(' ip dhcp snooping trust');
+        }
+        if (pg.dhcpTrust && h.dynamicArpInspection) {
+          lines.push(' ip arp inspection trust');
+        }
+      }
+      lines.push('!');
+    });
+  });
+
+  // SVI Interfaces
+  const shouldShutdownVlan1 =
+    h.shutdownVlan1 && !(state.management.enabled && state.management.vlanId === 1);
+  if (shouldShutdownVlan1) {
+    lines.push('interface Vlan1');
+    lines.push(' no ip address');
+    lines.push(' shutdown');
+    lines.push('!');
+  }
+  if (
+    state.management.enabled &&
+    isValidIpv4(state.management.ipAddress) &&
+    isValidIpv4(state.management.subnetMask)
+  ) {
+    lines.push(`interface Vlan${state.management.vlanId}`);
+    lines.push(' description Management_SVI');
+    lines.push(` ip address ${state.management.ipAddress.trim()} ${state.management.subnetMask.trim()}`);
+    lines.push(' no ip redirects');
+    lines.push(' no ip proxy-arp');
+    lines.push('!');
+  }
+
+  if (
+    state.management.enabled &&
+    state.management.defaultGateway.trim() &&
+    isValidIpv4(state.management.defaultGateway)
+  ) {
+    lines.push(`ip default-gateway ${state.management.defaultGateway.trim()}`);
+  }
+  if (h.disableHttp) {
+    lines.push('no ip http server');
+  }
+  if (h.disableHttps) {
+    lines.push('no ip http secure-server');
+  }
+  if (h.sshEnabled) {
+    lines.push(`ip ssh time-out ${h.sshTimeout}`);
+    lines.push(`ip ssh authentication-retries ${h.sshRetries}`);
+    lines.push(`ip ssh version ${h.sshVersion}`);
+  }
+  lines.push('!');
+
+  if (h.vtyAclEnabled && isValidIpv4(h.vtyAllowedNetwork) && isValidIpv4(h.vtyAllowedMask)) {
+    const wildcard = subnetMaskToWildcard(h.vtyAllowedMask);
+    lines.push('access-list 10 remark Allow_Management_Subnet');
+    lines.push(`access-list 10 permit ${h.vtyAllowedNetwork.trim()} ${wildcard}`);
+    lines.push('access-list 10 deny any log');
+    lines.push('!');
+  }
+
+  if (h.syslogServer.trim() && isValidIpv4(h.syslogServer)) {
+    lines.push(`logging trap informational`);
+    lines.push(`logging host ${h.syslogServer.trim()}`);
+  }
+  if (h.ntpServer.trim() && isValidIpv4(h.ntpServer)) {
+    lines.push(`ntp server ${h.ntpServer.trim()}`);
+  }
+
+  if (h.disableExtraBanners) {
+    lines.push('no banner exec');
+    lines.push('no banner incoming');
+    lines.push('no banner login');
+  }
+  if (state.bannerMotd.trim()) {
+    lines.push('banner motd ^C');
+    state.bannerMotd
+      .trim()
+      .split('\n')
+      .forEach((line) => lines.push(line.replace(/\^C/g, '')));
+    lines.push('^C');
+  }
+  lines.push('!');
+
+  lines.push('line con 0');
+  lines.push(` exec-timeout ${h.execTimeoutMinutes} 0`);
+  if (h.loggingSynchronous) {
+    lines.push(' logging synchronous');
+  }
+  if (!h.aaaNewModel) {
+    lines.push(' login local');
+  }
+  lines.push('line vty 0 4');
+  if (h.vtyAclEnabled && isValidIpv4(h.vtyAllowedNetwork) && isValidIpv4(h.vtyAllowedMask)) {
+    lines.push(' access-class 10 in');
+  }
+  lines.push(` exec-timeout ${h.execTimeoutMinutes} 0`);
+  if (h.loggingSynchronous) {
+    lines.push(' logging synchronous');
+  }
+  if (!h.aaaNewModel) {
+    lines.push(' login local');
+  }
+  if (h.disableTelnet && h.sshEnabled) {
+    lines.push(' transport input ssh');
+  } else if (h.sshEnabled) {
+    lines.push(' transport input ssh telnet');
+  }
+  lines.push('line vty 5 15');
+  if (h.vtyAclEnabled && isValidIpv4(h.vtyAllowedNetwork) && isValidIpv4(h.vtyAllowedMask)) {
+    lines.push(' access-class 10 in');
+  }
+  lines.push(` exec-timeout ${h.execTimeoutMinutes} 0`);
+  if (h.loggingSynchronous) {
+    lines.push(' logging synchronous');
+  }
+  if (!h.aaaNewModel) {
+    lines.push(' login local');
+  }
+  if (h.disableTelnet && h.sshEnabled) {
+    lines.push(' transport input ssh');
+  } else if (h.sshEnabled) {
+    lines.push(' transport input ssh telnet');
+  }
+  lines.push('!');
+  lines.push('end');
+
+  return lines.join('\n');
+}
+
+export function generateVlanConfigFile(state: SwitchConfigState): string {
+  const lines: string[] = [];
+  const validVlans = state.vlans.filter((v) => v.vlanId >= 2 && v.vlanId <= 4094);
+
+  lines.push('!');
+  lines.push(`! Cisco IOS VLAN Configuration File - ${state.hostname.trim() || 'Switch'}`);
+  lines.push('! Upload command: copy tftp://<SERVER_IP>/vlans.cfg running-config');
+  lines.push('!');
+
+  if (validVlans.length === 0) {
+    lines.push('! No custom VLANs defined (VLAN 2-4094)');
+  } else {
+    validVlans.forEach((vlan) => {
+      lines.push(`vlan ${vlan.vlanId}`);
+      if (vlan.name.trim()) {
+        lines.push(` name ${vlan.name.trim().replace(/\s+/g, '_')}`);
+      }
+      lines.push(vlan.state === 'suspend' ? ' state suspend' : ' state active');
+      lines.push('!');
+    });
+  }
+
+  lines.push('end');
+  return lines.join('\n');
+}
+
 export function generateVerificationCommands(state: SwitchConfigState): string {
   const cmds: string[] = [
     '! --- دستورات بررسی و عیب‌یابی پس از اعمال کانفیگ ---',

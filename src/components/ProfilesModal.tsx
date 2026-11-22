@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Bookmark, FolderOpen, Save, Trash2, X } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { Bookmark, Database, Download, FolderOpen, Save, Search, Trash2, Upload, X } from 'lucide-react';
 import { SavedProfile, SwitchConfigState } from '../types/cisco';
 import { PRESET_CONFIGS } from '../utils/ciscoGenerator';
 import { inputClassName } from './FormControls';
@@ -12,6 +12,7 @@ interface ProfilesModalProps {
   onSaveProfile: (name: string) => void;
   onLoadConfig: (config: SwitchConfigState) => void;
   onDeleteProfile: (id: string) => void;
+  onImportProfiles: (profiles: SavedProfile[]) => Promise<void>;
 }
 
 export const ProfilesModal: React.FC<ProfilesModalProps> = ({
@@ -22,8 +23,12 @@ export const ProfilesModal: React.FC<ProfilesModalProps> = ({
   onSaveProfile,
   onLoadConfig,
   onDeleteProfile,
+  onImportProfiles,
 }) => {
   const [profileName, setProfileName] = useState(currentConfig.hostname || 'SW-Template');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [importStatus, setImportStatus] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!isOpen) return null;
 
@@ -33,6 +38,45 @@ export const ProfilesModal: React.FC<ProfilesModalProps> = ({
     onSaveProfile(profileName.trim());
     setProfileName('');
   };
+
+  const handleExportDatabase = () => {
+    const payload = JSON.stringify(savedProfiles, null, 2);
+    const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cisco-config-db-backup.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as SavedProfile[];
+      if (!Array.isArray(parsed)) {
+        setImportStatus('ساختار فایل پشتیبان معتبر نیست.');
+        return;
+      }
+      await onImportProfiles(parsed);
+      setImportStatus(`${parsed.length} پروفایل با موفقیت به دیتابیس محلی اضافه شد.`);
+    } catch {
+      setImportStatus('خطا در خواندن فایل پشتیبان JSON.');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const filteredProfiles = savedProfiles.filter((p) => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      p.name.toLowerCase().includes(q) ||
+      p.config.hostname.toLowerCase().includes(q)
+    );
+  });
 
   return (
     <div
@@ -47,10 +91,11 @@ export const ProfilesModal: React.FC<ProfilesModalProps> = ({
           <div className="flex items-center justify-between gap-4">
             <div>
               <h2 id="profiles-modal-title" className="text-base font-bold text-slate-900 dark:text-slate-100">
-                الگوهای آماده و پروفایل‌های ذخیره‌شده
+                الگوها و دیتابیس محلی دستگاه
               </h2>
-              <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                ذخیره آفلاین کانفیگ‌ها در حافظه گوشی برای استفاده مجدد
+              <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                <Database className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400 shrink-0" />
+                <span>ذخیره‌سازی آفلاین در دیتابیس IndexedDB گوشی</span>
               </p>
             </div>
             <button
@@ -68,7 +113,7 @@ export const ProfilesModal: React.FC<ProfilesModalProps> = ({
           {/* Save current */}
           <form onSubmit={handleSave} className="space-y-2">
             <label htmlFor="save-profile-name" className="text-xs font-semibold text-slate-700 dark:text-slate-300 block">
-              ذخیره کانفیگ فعلی در حافظه دستگاه
+              ذخیره کانفیگ فعلی در دیتابیس محلی
             </label>
             <div className="flex items-center gap-2">
               <input
@@ -76,7 +121,7 @@ export const ProfilesModal: React.FC<ProfilesModalProps> = ({
                 type="text"
                 value={profileName}
                 onChange={(e) => setProfileName(e.target.value)}
-                placeholder="نام پروفایل (مثلاً طبقه دوم)"
+                placeholder="نام پروفایل (مثلاً سوئیچ طبقه دوم)"
                 className={inputClassName}
               />
               <button
@@ -89,47 +134,70 @@ export const ProfilesModal: React.FC<ProfilesModalProps> = ({
             </div>
           </form>
 
-          {/* Factory Presets */}
-          <div>
-            <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 mb-2.5 flex items-center gap-1.5">
-              <Bookmark className="w-3.5 h-3.5" />
-              <span>الگوهای استاندارد سیسکو</span>
-            </h3>
-            <div className="space-y-2">
-              {(Object.keys(PRESET_CONFIGS) as Array<keyof typeof PRESET_CONFIGS>).map((key) => {
-                const preset = PRESET_CONFIGS[key];
-                return (
+          {/* Saved in IndexedDB */}
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 flex items-center gap-1.5 tabular-nums">
+                <FolderOpen className="w-3.5 h-3.5" />
+                <span>پروفایل‌های ذخیره‌شده ({savedProfiles.length})</span>
+              </h3>
+              <div className="flex items-center gap-1.5">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={handleImportFile}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="min-h-[36px] px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>بازیابی</span>
+                </button>
+                {savedProfiles.length > 0 && (
                   <button
-                    key={key}
                     type="button"
-                    onClick={() => {
-                      onLoadConfig(structuredClone(preset.config));
-                      onClose();
-                    }}
-                    className="w-full text-right p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-sky-400 dark:hover:border-sky-700 bg-slate-50/70 dark:bg-slate-950/60 transition-colors cursor-pointer"
+                    onClick={handleExportDatabase}
+                    className="min-h-[36px] px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 inline-flex items-center gap-1 cursor-pointer"
                   >
-                    <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{preset.label}</div>
-                    <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{preset.subtitle}</div>
+                    <Download className="w-3.5 h-3.5" />
+                    <span>پشتیبان JSON</span>
                   </button>
-                );
-              })}
+                )}
+              </div>
             </div>
-          </div>
 
-          {/* Saved in localStorage */}
-          <div>
-            <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 mb-2.5 flex items-center gap-1.5">
-              <FolderOpen className="w-3.5 h-3.5" />
-              <span>پروفایل‌های ذخیره شده ({savedProfiles.length})</span>
-            </h3>
+            {importStatus && (
+              <div className="text-xs text-sky-700 dark:text-sky-300 bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-900 rounded-xl px-3 py-2">
+                {importStatus}
+              </div>
+            )}
 
-            {savedProfiles.length === 0 ? (
+            {savedProfiles.length > 2 && (
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="جستجو بر اساس نام یا Hostname..."
+                  className={`${inputClassName} pr-9 text-xs`}
+                />
+              </div>
+            )}
+
+            {filteredProfiles.length === 0 ? (
               <p className="text-xs text-slate-500 dark:text-slate-400 py-3 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                هنوز پروفایلی ذخیره نکرده‌اید.
+                {savedProfiles.length === 0
+                  ? 'هنوز پروفایلی در دیتابیس محلی ذخیره نکرده‌اید.'
+                  : 'موردی با این جستجو پیدا نشد.'}
               </p>
             ) : (
               <div className="space-y-2">
-                {savedProfiles.map((prof) => (
+                {filteredProfiles.map((prof) => (
                   <div
                     key={prof.id}
                     className="flex items-center justify-between gap-2 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950"
@@ -159,6 +227,33 @@ export const ProfilesModal: React.FC<ProfilesModalProps> = ({
                 ))}
               </div>
             )}
+          </div>
+
+          {/* Factory Presets */}
+          <div>
+            <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 mb-2.5 flex items-center gap-1.5">
+              <Bookmark className="w-3.5 h-3.5" />
+              <span>الگوهای استاندارد سیسکو</span>
+            </h3>
+            <div className="space-y-2">
+              {(Object.keys(PRESET_CONFIGS) as Array<keyof typeof PRESET_CONFIGS>).map((key) => {
+                const preset = PRESET_CONFIGS[key];
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => {
+                      onLoadConfig(structuredClone(preset.config));
+                      onClose();
+                    }}
+                    className="w-full text-right p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-sky-400 dark:hover:border-sky-700 bg-slate-50/70 dark:bg-slate-950/60 transition-colors cursor-pointer"
+                  >
+                    <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{preset.label}</div>
+                    <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{preset.subtitle}</div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
       </div>

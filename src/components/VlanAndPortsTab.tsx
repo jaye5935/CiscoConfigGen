@@ -1,5 +1,5 @@
-import React from 'react';
-import { Network, Plus, Trash2 } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Download, Network, Plus, Trash2 } from 'lucide-react';
 import {
   PortGroupConfig,
   PortMediaType,
@@ -8,7 +8,7 @@ import {
   ViolationMode,
   VlanConfig,
 } from '../types/cisco';
-import { formatInterfaceCommand } from '../utils/ciscoGenerator';
+import { formatInterfaceCommand, generateVlanConfigFile } from '../utils/ciscoGenerator';
 import { FieldLabel, inputClassName } from './FormControls';
 
 const PORT_TYPES: Array<{
@@ -28,38 +28,192 @@ interface VlanAndPortsTabProps {
   onChange: (updater: (prev: SwitchConfigState) => SwitchConfigState) => void;
 }
 
-const COMMON_VLANS: Array<{ vlanId: number; name: string; label: string }> = [
-  { vlanId: 10, name: 'DATA_USERS', label: 'کاربران (10)' },
-  { vlanId: 20, name: 'VOICE_IP', label: 'تلفن تحت شبکه (20)' },
-  { vlanId: 30, name: 'GUEST_WIFI', label: 'مهمان (30)' },
-  { vlanId: 50, name: 'SERVERS', label: 'سرورها (50)' },
-  { vlanId: 99, name: 'MGMT', label: 'مدیریت (99)' },
-  { vlanId: 999, name: 'BLACKHOLE', label: 'پورت غیرفعال (999)' },
-];
+interface VlanItemRowProps {
+  vlan: VlanConfig;
+  onUpdate: (id: string, patch: Partial<VlanConfig>) => void;
+  onRemove: (id: string) => void;
+}
+
+const VlanItemRow: React.FC<VlanItemRowProps> = ({ vlan, onUpdate, onRemove }) => {
+  const [idText, setIdText] = useState(String(vlan.vlanId));
+
+  useEffect(() => {
+    setIdText(String(vlan.vlanId));
+  }, [vlan.vlanId]);
+
+  const handleIdChange = (raw: string) => {
+    setIdText(raw);
+    if (raw.trim() === '') return;
+    const num = Number(raw);
+    if (!Number.isNaN(num) && num >= 2 && num <= 4094) {
+      onUpdate(vlan.id, { vlanId: Math.floor(num) });
+    }
+  };
+
+  const handleIdBlur = () => {
+    const num = Number(idText);
+    const clamped = Number.isNaN(num) ? vlan.vlanId : Math.min(4094, Math.max(2, Math.floor(num)));
+    setIdText(String(clamped));
+    if (clamped !== vlan.vlanId) {
+      onUpdate(vlan.id, { vlanId: clamped });
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-12 gap-2.5 items-end p-3 rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950/50">
+      <div className="col-span-4 sm:col-span-3">
+        <FieldLabel label="شناسه VLAN" />
+        <input
+          type="number"
+          min={2}
+          max={4094}
+          dir="ltr"
+          value={idText}
+          onChange={(e) => handleIdChange(e.target.value)}
+          onBlur={handleIdBlur}
+          className={`${inputClassName} font-mono tabular-nums text-left`}
+        />
+      </div>
+
+      <div className="col-span-8 sm:col-span-5">
+        <FieldLabel label="نام VLAN" />
+        <input
+          type="text"
+          dir="ltr"
+          value={vlan.name}
+          onChange={(e) => onUpdate(vlan.id, { name: e.target.value })}
+          placeholder="نام VLAN (مثلاً SALES)"
+          className={`${inputClassName} font-mono text-left`}
+        />
+      </div>
+
+      <div className="col-span-9 sm:col-span-3">
+        <FieldLabel label="وضعیت" />
+        <select
+          value={vlan.state}
+          onChange={(e) =>
+            onUpdate(vlan.id, { state: e.target.value as 'active' | 'suspend' })
+          }
+          className={inputClassName}
+        >
+          <option value="active">فعال (Active)</option>
+          <option value="suspend">معلق (Suspend)</option>
+        </select>
+      </div>
+
+      <div className="col-span-3 sm:col-span-1 flex justify-end">
+        <button
+          type="button"
+          onClick={() => onRemove(vlan.id)}
+          className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 cursor-pointer"
+          aria-label="حذف VLAN"
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+};
 
 export const VlanAndPortsTab: React.FC<VlanAndPortsTabProps> = ({ config, onChange }) => {
-  const addVlan = (preset?: { vlanId: number; name: string }) => {
-    const existingIds = new Set(config.vlans.map((v) => v.vlanId));
-    let nextId = preset?.vlanId ?? 10;
-    if (!preset) {
-      while (existingIds.has(nextId) && nextId < 4094) {
-        nextId += 10;
-      }
-    } else if (existingIds.has(preset.vlanId)) {
-      return;
+  const [vlanIdInput, setVlanIdInput] = useState('');
+  const [vlanNameInput, setVlanNameInput] = useState('');
+
+  const handleDownloadVlansFile = () => {
+    const content = generateVlanConfigFile(config);
+    const safeName = (config.hostname.trim() || 'cisco-switch').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${safeName}-vlans.cfg`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const findNextFreeVlanId = (existingIds: Set<number>): number => {
+    for (let id = 10; id <= 4090; id += 10) {
+      if (!existingIds.has(id)) return id;
     }
+    for (let id = 2; id <= 4094; id++) {
+      if (!existingIds.has(id)) return id;
+    }
+    return 100;
+  };
 
-    const newVlan: VlanConfig = {
-      id: `vlan-${Date.now()}-${nextId}`,
-      vlanId: nextId,
-      name: preset?.name ?? `VLAN_${nextId}`,
-      state: 'active',
-    };
+  const makeUid = (suffix: string | number) =>
+    `vlan-${Date.now()}-${suffix}-${Math.random().toString(36).slice(2, 6)}`;
 
-    onChange((prev) => ({
-      ...prev,
-      vlans: [...prev.vlans, newVlan].sort((a, b) => a.vlanId - b.vlanId),
-    }));
+  const addEmptyVlanRow = () => {
+    onChange((prev) => {
+      const existingIds = new Set(prev.vlans.map((v) => v.vlanId));
+      const nextId = findNextFreeVlanId(existingIds);
+      const newVlan: VlanConfig = {
+        id: makeUid(nextId),
+        vlanId: nextId,
+        name: '',
+        state: 'active',
+      };
+      return {
+        ...prev,
+        vlans: [...prev.vlans, newVlan].sort((a, b) => a.vlanId - b.vlanId),
+      };
+    });
+  };
+
+  const addCustomVlans = (e: React.FormEvent) => {
+    e.preventDefault();
+    const raw = vlanIdInput.trim();
+    if (!raw) return;
+
+    const idsToAdd: number[] = [];
+    raw.split(',').forEach((chunk) => {
+      const part = chunk.trim();
+      if (!part) return;
+      if (part.includes('-')) {
+        const [a, b] = part.split('-').map((n) => Number(n.trim()));
+        if (!Number.isNaN(a) && !Number.isNaN(b)) {
+          const start = Math.max(2, Math.min(a, b));
+          const end = Math.min(4094, Math.max(a, b));
+          for (let id = start; id <= end && idsToAdd.length < 200; id++) {
+            idsToAdd.push(id);
+          }
+        }
+      } else {
+        const id = Number(part);
+        if (!Number.isNaN(id) && id >= 2 && id <= 4094) {
+          idsToAdd.push(Math.floor(id));
+        }
+      }
+    });
+
+    if (idsToAdd.length === 0) return;
+
+    const userProvidedName = vlanNameInput.trim();
+
+    onChange((prev) => {
+      const existingIds = new Set(prev.vlans.map((v) => v.vlanId));
+      const newItems: VlanConfig[] = [];
+      idsToAdd.forEach((id) => {
+        if (!existingIds.has(id)) {
+          existingIds.add(id);
+          newItems.push({
+            id: makeUid(id),
+            vlanId: id,
+            name: userProvidedName,
+            state: 'active',
+          });
+        }
+      });
+      if (newItems.length === 0) return prev;
+      return {
+        ...prev,
+        vlans: [...prev.vlans, ...newItems].sort((a, b) => a.vlanId - b.vlanId),
+      };
+    });
+
+    setVlanIdInput('');
+    setVlanNameInput('');
   };
 
   const updateVlan = (id: string, patch: Partial<VlanConfig>) => {
@@ -138,46 +292,67 @@ export const VlanAndPortsTab: React.FC<VlanAndPortsTabProps> = ({ config, onChan
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div>
             <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">ساخت و مدیریت VLANها</h2>
-            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-              تعریف شناسه، نام و وضعیت هر VLAN جهت جداسازی ترافیک شبکه
+            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+              {config.vlans.length} VLAN تعریف شده · امکان افزودن تعداد نامحدود VLAN (2 تا 4094)
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => addVlan()}
-            className="inline-flex items-center gap-1.5 min-h-[44px] px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors cursor-pointer shrink-0"
-          >
-            <Plus className="w-4 h-4" />
-            <span>افزودن VLAN</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleDownloadVlansFile}
+              className="inline-flex items-center gap-1.5 min-h-[44px] px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors cursor-pointer shrink-0"
+              title="دانلود فایل مستقل VLANها برای آپلود روی سوئیچ"
+            >
+              <Download className="w-4 h-4" />
+              <span>دانلود فایل VLAN (.cfg)</span>
+            </button>
+            <button
+              type="button"
+              onClick={addEmptyVlanRow}
+              className="inline-flex items-center gap-1.5 min-h-[44px] px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors cursor-pointer shrink-0"
+            >
+              <Plus className="w-4 h-4" />
+              <span>افزودن ردیف خالی</span>
+            </button>
+          </div>
         </div>
 
-        {/* Quick presets */}
-        <div className="mb-4 pb-4 border-b border-slate-100 dark:border-slate-800">
-          <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mb-2">
-            افزودن سریع VLANهای پرکاربرد:
+        {/* Custom VLAN ID + Name Adder */}
+        <form
+          onSubmit={addCustomVlans}
+          className="mb-4 pb-4 border-b border-slate-100 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end"
+        >
+          <div className="sm:col-span-5">
+            <FieldLabel label="شناسه یا بازه VLAN" hint="مثلاً 10 یا 100-105 یا 10,20,30" />
+            <input
+              type="text"
+              dir="ltr"
+              value={vlanIdInput}
+              onChange={(e) => setVlanIdInput(e.target.value)}
+              placeholder="10 یا 100-105"
+              className={`${inputClassName} font-mono tabular-nums text-left text-xs`}
+            />
           </div>
-          <div className="flex flex-wrap gap-2">
-            {COMMON_VLANS.map((preset) => {
-              const exists = config.vlans.some((v) => v.vlanId === preset.vlanId);
-              return (
-                <button
-                  key={preset.vlanId}
-                  type="button"
-                  disabled={exists}
-                  onClick={() => addVlan(preset)}
-                  className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors whitespace-nowrap ${
-                    exists
-                      ? 'border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-800/50 text-slate-400 dark:text-slate-600 cursor-not-allowed'
-                      : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 hover:border-sky-400 hover:text-sky-700 dark:hover:text-sky-300 cursor-pointer'
-                  }`}
-                >
-                  + {preset.label}
-                </button>
-              );
-            })}
+          <div className="sm:col-span-5">
+            <FieldLabel label="نام VLAN" hint="نام دلخواه شما" />
+            <input
+              type="text"
+              dir="ltr"
+              value={vlanNameInput}
+              onChange={(e) => setVlanNameInput(e.target.value)}
+              placeholder="مثلاً IT_LAN"
+              className={`${inputClassName} font-mono text-left text-xs`}
+            />
           </div>
-        </div>
+          <div className="sm:col-span-2">
+            <button
+              type="submit"
+              className="w-full min-h-[44px] px-4 rounded-xl bg-slate-900 dark:bg-slate-100 hover:bg-slate-800 dark:hover:bg-white text-white dark:text-slate-900 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
+            >
+              افزودن
+            </button>
+          </div>
+        </form>
 
         {config.vlans.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-300 dark:border-slate-700 p-6 text-center">
@@ -187,65 +362,22 @@ export const VlanAndPortsTab: React.FC<VlanAndPortsTabProps> = ({ config, onChan
         ) : (
           <div className="space-y-3">
             {config.vlans.map((vlan) => (
-              <div
+              <VlanItemRow
                 key={vlan.id}
-                className="grid grid-cols-12 gap-2.5 items-end p-3 rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950/50"
-              >
-                <div className="col-span-4 sm:col-span-3">
-                  <FieldLabel label="شناسه VLAN" />
-                  <input
-                    type="number"
-                    min={2}
-                    max={4094}
-                    dir="ltr"
-                    value={vlan.vlanId}
-                    onChange={(e) =>
-                      updateVlan(vlan.id, {
-                        vlanId: Math.min(4094, Math.max(1, Number(e.target.value) || 1)),
-                      })
-                    }
-                    className={`${inputClassName} font-mono tabular-nums text-left`}
-                  />
-                </div>
-
-                <div className="col-span-8 sm:col-span-5">
-                  <FieldLabel label="نام VLAN" />
-                  <input
-                    type="text"
-                    dir="ltr"
-                    value={vlan.name}
-                    onChange={(e) => updateVlan(vlan.id, { name: e.target.value })}
-                    placeholder="USERS"
-                    className={`${inputClassName} font-mono text-left`}
-                  />
-                </div>
-
-                <div className="col-span-9 sm:col-span-3">
-                  <FieldLabel label="وضعیت" />
-                  <select
-                    value={vlan.state}
-                    onChange={(e) =>
-                      updateVlan(vlan.id, { state: e.target.value as 'active' | 'suspend' })
-                    }
-                    className={inputClassName}
-                  >
-                    <option value="active">فعال (Active)</option>
-                    <option value="suspend">معلق (Suspend)</option>
-                  </select>
-                </div>
-
-                <div className="col-span-3 sm:col-span-1 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={() => removeVlan(vlan.id)}
-                    className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 cursor-pointer"
-                    aria-label="حذف VLAN"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
+                vlan={vlan}
+                onUpdate={updateVlan}
+                onRemove={removeVlan}
+              />
             ))}
+
+            <button
+              type="button"
+              onClick={addEmptyVlanRow}
+              className="w-full min-h-[44px] rounded-xl border border-dashed border-sky-300 dark:border-sky-800 text-sky-700 dark:text-sky-400 hover:bg-sky-50 dark:hover:bg-sky-950/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>افزودن VLAN جدید</span>
+            </button>
           </div>
         )}
       </section>

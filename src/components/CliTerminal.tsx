@@ -1,9 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import { AlertTriangle, Check, Copy, Download, Share2, Terminal } from 'lucide-react';
+import { AlertTriangle, Check, Copy, Download, FileCode2, Share2, Terminal } from 'lucide-react';
 import { SwitchConfigState } from '../types/cisco';
 import {
   generateCiscoCli,
+  generateStartupConfigFile,
   generateVerificationCommands,
+  generateVlanConfigFile,
   validateSwitchConfig,
 } from '../utils/ciscoGenerator';
 
@@ -11,14 +13,24 @@ interface CliTerminalProps {
   config: SwitchConfigState;
 }
 
+type OutputMode = 'config' | 'startup' | 'vlan' | 'verify';
+
 export const CliTerminal: React.FC<CliTerminalProps> = ({ config }) => {
-  const [viewMode, setViewMode] = useState<'config' | 'verify'>('config');
+  const [viewMode, setViewMode] = useState<OutputMode>('config');
   const [copied, setCopied] = useState(false);
 
   const cliText = useMemo(() => {
-    return viewMode === 'config'
-      ? generateCiscoCli(config)
-      : generateVerificationCommands(config);
+    switch (viewMode) {
+      case 'startup':
+        return generateStartupConfigFile(config);
+      case 'vlan':
+        return generateVlanConfigFile(config);
+      case 'verify':
+        return generateVerificationCommands(config);
+      case 'config':
+      default:
+        return generateCiscoCli(config);
+    }
   }, [config, viewMode]);
 
   const warnings = useMemo(() => validateSwitchConfig(config), [config]);
@@ -41,16 +53,27 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ config }) => {
     }
   };
 
-  const handleDownload = () => {
-    const safeName = (config.hostname.trim() || 'cisco-switch').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const suffix = viewMode === 'config' ? 'config.cfg' : 'verify.txt';
-    const blob = new Blob([cliText], { type: 'text/plain;charset=utf-8' });
+  const triggerDownload = (filename: string, content: string) => {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${safeName}-${suffix}`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleDownload = (asConfigText = false) => {
+    const safeName = (config.hostname.trim() || 'cisco-switch').replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (viewMode === 'startup') {
+      triggerDownload(asConfigText ? 'config.text' : `${safeName}-startup.cfg`, cliText);
+    } else if (viewMode === 'vlan') {
+      triggerDownload(`${safeName}-vlans.cfg`, cliText);
+    } else if (viewMode === 'verify') {
+      triggerDownload(`${safeName}-verify.txt`, cliText);
+    } else {
+      triggerDownload(`${safeName}-config.cfg`, cliText);
+    }
   };
 
   const handleShare = async () => {
@@ -98,6 +121,13 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ config }) => {
     return 'text-slate-100';
   };
 
+  const modeTabs: Array<{ id: OutputMode; label: string }> = [
+    { id: 'config', label: 'کانفیگ CLI' },
+    { id: 'startup', label: 'فایل سوییچ' },
+    { id: 'vlan', label: 'فایل VLAN' },
+    { id: 'verify', label: 'دستورات تست' },
+  ];
+
   return (
     <div className="flex flex-col gap-3">
       {/* Validation notices */}
@@ -122,76 +152,102 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ config }) => {
       {/* Terminal Card */}
       <div className="rounded-2xl border border-slate-800 bg-slate-950 text-slate-100 overflow-hidden shadow-lg">
         {/* Terminal Header */}
-        <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 border-b border-slate-800 bg-slate-900/90">
-          <div className="flex items-center gap-2">
-            <Terminal className="w-4 h-4 text-sky-400 shrink-0" />
-            <div className="flex items-center gap-1 p-0.5 rounded-lg bg-slate-800">
+        <div className="flex flex-col gap-2 px-3.5 py-2.5 border-b border-slate-800 bg-slate-900/90">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-sky-400 shrink-0" />
+              <span className="text-[11px] text-slate-400 tabular-nums">
+                {lines.length} خط
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => setViewMode('config')}
-                className={`min-h-[34px] px-2.5 rounded-md text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-                  viewMode === 'config'
-                    ? 'bg-sky-600 text-white'
-                    : 'text-slate-300 hover:text-white'
-                }`}
+                onClick={handleShare}
+                className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors cursor-pointer"
+                title="اشتراک‌گذاری"
+                aria-label="اشتراک‌گذاری کانفیگ"
               >
-                کانفیگ IOS
+                <Share2 className="w-4 h-4" />
               </button>
+
+              {viewMode === 'startup' && (
+                <button
+                  type="button"
+                  onClick={() => handleDownload(true)}
+                  className="min-h-[38px] px-2.5 flex items-center justify-center gap-1.5 rounded-lg border border-sky-700/70 bg-sky-950/60 hover:bg-sky-900/60 text-xs font-medium text-sky-300 transition-colors cursor-pointer whitespace-nowrap"
+                  title="دانلود استاندارد با نام config.text برای فلش سوئیچ"
+                >
+                  <FileCode2 className="w-4 h-4" />
+                  <span>config.text</span>
+                </button>
+              )}
+
               <button
                 type="button"
-                onClick={() => setViewMode('verify')}
-                className={`min-h-[34px] px-2.5 rounded-md text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-                  viewMode === 'verify'
-                    ? 'bg-sky-600 text-white'
-                    : 'text-slate-300 hover:text-white'
+                onClick={() => handleDownload(false)}
+                className="min-h-[38px] px-2.5 flex items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors cursor-pointer whitespace-nowrap"
+                title="دانلود فایل کانفیگ"
+              >
+                <Download className="w-4 h-4" />
+                <span>{viewMode === 'verify' ? '.txt' : '.cfg'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleCopy}
+                className={`min-h-[38px] px-3 flex items-center justify-center gap-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                  copied
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-sky-600 hover:bg-sky-500 text-white'
                 }`}
               >
-                دستورات تست
+                {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                <span>{copied ? 'کپی شد' : 'کپی'}</span>
               </button>
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <span className="hidden sm:inline text-[11px] text-slate-400 tabular-nums ml-2">
-              {lines.length} خط
-            </span>
-            <button
-              type="button"
-              onClick={handleShare}
-              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors cursor-pointer"
-              title="اشتراک‌گذاری"
-              aria-label="اشتراک‌گذاری کانفیگ"
-            >
-              <Share2 className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={handleDownload}
-              className="min-h-[38px] px-2.5 flex items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors cursor-pointer whitespace-nowrap"
-              title="دانلود فایل .cfg"
-            >
-              <Download className="w-4 h-4" />
-              <span className="hidden sm:inline">.cfg</span>
-            </button>
-            <button
-              type="button"
-              onClick={handleCopy}
-              className={`min-h-[38px] px-3 flex items-center justify-center gap-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-                copied
-                  ? 'bg-emerald-600 text-white'
-                  : 'bg-sky-600 hover:bg-sky-500 text-white'
-              }`}
-            >
-              {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-              <span>{copied ? 'کپی شد' : 'کپی'}</span>
-            </button>
+          {/* 4-Mode Segmented Switcher */}
+          <div className="grid grid-cols-4 gap-1 p-1 rounded-xl bg-slate-800/90">
+            {modeTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setViewMode(tab.id)}
+                className={`min-h-[34px] px-1.5 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer whitespace-nowrap truncate ${
+                  viewMode === tab.id
+                    ? 'bg-sky-600 text-white shadow-sm'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
         </div>
+
+        {/* Upload Tip Strip for File Modes */}
+        {(viewMode === 'startup' || viewMode === 'vlan') && (
+          <div className="px-3.5 py-2 border-b border-slate-800 bg-slate-900/50 text-[11px] text-slate-300 flex flex-wrap items-center justify-between gap-2">
+            <span>
+              {viewMode === 'startup'
+                ? 'فایل استاندارد Startup-Config برای آپلود مستقیم روی سوئیچ:'
+                : 'فایل مستقل VLANها برای آپلود یا اعمال روی سوئیچ:'}
+            </span>
+            <code dir="ltr" className="font-mono text-sky-400 text-[11px]">
+              {viewMode === 'startup'
+                ? 'copy tftp: startup-config'
+                : 'copy tftp: running-config'}
+            </code>
+          </div>
+        )}
 
         {/* Code Area (strictly LTR) */}
         <div
           dir="ltr"
-          className="cli-scroll overflow-x-auto max-h-[62vh] lg:max-h-[calc(100vh-14rem)] overflow-y-auto p-3.5 text-left font-mono text-[12px] leading-relaxed"
+          className="cli-scroll overflow-x-auto max-h-[60vh] lg:max-h-[calc(100vh-16rem)] overflow-y-auto p-3.5 text-left font-mono text-[12px] leading-relaxed"
         >
           <table className="w-full border-collapse">
             <tbody>
